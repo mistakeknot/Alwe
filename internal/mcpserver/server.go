@@ -7,7 +7,7 @@ import (
 	"fmt"
 
 	"github.com/google/jsonschema-go/jsonschema"
-	"github.com/mistakeknot/Alwe/pkg/observer"
+	"github.com/mistakeknot/Alwe/internal/observer"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
