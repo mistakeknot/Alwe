@@ -25,7 +25,7 @@ import (
 	"syscall"
 
 	"github.com/mistakeknot/Alwe/internal/mcpserver"
-	"github.com/mistakeknot/Alwe/internal/observer"
+	"github.com/mistakeknot/Alwe/pkg/observer"
 )
 
 func main() {

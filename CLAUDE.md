@@ -16,8 +16,9 @@ The other half of Zakalwe — Zaka steers, Alwe observes.
 
 ```
 cmd/alwe/              CLI + MCP server entry point
+pkg/
+  observer/            CASS observer (real-time tail + query) — public API for cross-module import
 internal/
-  observer/            CASS observer (real-time tail + query)
   mcpserver/           MCP server exposing 5 CASS-backed tools
 ```
 
