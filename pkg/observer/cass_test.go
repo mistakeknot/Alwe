@@ -91,6 +91,65 @@ func TestParseJSONLEvent_UnknownType(t *testing.T) {
 	}
 }
 
+func TestParseSearchOutput(t *testing.T) {
+	out := []byte(`{
+		"query": "kimi",
+		"limit": 2,
+		"count": 1,
+		"total_matches": 1,
+		"hits": [
+			{
+				"title": "some session",
+				"snippet": "hello **kimi**",
+				"content": "hello kimi",
+				"score": 12.5,
+				"source_path": "/Users/x/.claude/projects/-w/abc123.jsonl",
+				"agent": "claude_code",
+				"workspace": "/Users/x/projects",
+				"created_at": 1784737086683,
+				"line_number": 42,
+				"match_type": "exact"
+			}
+		]
+	}`)
+	results, err := parseSearchOutput(out)
+	if err != nil {
+		t.Fatalf("parseSearchOutput: %v", err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("got %d results, want 1", len(results))
+	}
+	r := results[0]
+	if r.SessionID != "abc123" {
+		t.Errorf("SessionID = %q, want abc123", r.SessionID)
+	}
+	if r.Provider != "claude_code" {
+		t.Errorf("Provider = %q, want claude_code", r.Provider)
+	}
+	if r.FilePath != "/Users/x/.claude/projects/-w/abc123.jsonl" {
+		t.Errorf("FilePath = %q", r.FilePath)
+	}
+	if r.Snippet != "hello **kimi**" {
+		t.Errorf("Snippet = %q", r.Snippet)
+	}
+	if r.Score != 12.5 {
+		t.Errorf("Score = %v", r.Score)
+	}
+	if r.Timestamp != "2026-07-22T16:18:06Z" {
+		t.Errorf("Timestamp = %q", r.Timestamp)
+	}
+}
+
+func TestParseSearchOutput_Empty(t *testing.T) {
+	results, err := parseSearchOutput([]byte(`{"query":"x","hits":[]}`))
+	if err != nil {
+		t.Fatalf("parseSearchOutput: %v", err)
+	}
+	if len(results) != 0 {
+		t.Errorf("got %d results, want 0", len(results))
+	}
+}
+
 func TestTruncate(t *testing.T) {
 	if got := truncate("hello", 10); got != "hello" {
 		t.Errorf("short string: got %q", got)

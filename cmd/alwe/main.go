@@ -22,6 +22,7 @@ import (
 	"log"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 
 	"github.com/mistakeknot/Alwe/internal/mcpserver"
@@ -69,11 +70,30 @@ func main() {
 	}
 }
 
+// parseFlags parses args while allowing flags after the positional argument
+// (the standard flag package stops at the first non-flag argument).
+func parseFlags(fs *flag.FlagSet, args []string) {
+	var flags, positional []string
+	for i := 0; i < len(args); i++ {
+		a := args[i]
+		if strings.HasPrefix(a, "-") {
+			flags = append(flags, a)
+			if !strings.Contains(a, "=") && i+1 < len(args) && !strings.HasPrefix(args[i+1], "-") {
+				flags = append(flags, args[i+1])
+				i++
+			}
+		} else {
+			positional = append(positional, a)
+		}
+	}
+	fs.Parse(append(flags, positional...))
+}
+
 func cmdSearch(ctx context.Context, obs *observer.CassObserver, args []string) {
 	fs := flag.NewFlagSet("search", flag.ExitOnError)
 	connector := fs.String("connector", "", "Filter by agent connector")
 	limit := fs.Int("limit", 10, "Maximum results")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	query := fs.Arg(0)
 	if query == "" {
@@ -92,7 +112,7 @@ func cmdSearch(ctx context.Context, obs *observer.CassObserver, args []string) {
 func cmdTimeline(ctx context.Context, obs *observer.CassObserver, args []string) {
 	fs := flag.NewFlagSet("timeline", flag.ExitOnError)
 	since := fs.String("since", "1h", "Time range")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	tl, err := obs.Timeline(ctx, *since)
 	if err != nil {
@@ -115,7 +135,7 @@ func cmdExport(ctx context.Context, obs *observer.CassObserver, args []string) {
 func cmdContext(ctx context.Context, obs *observer.CassObserver, args []string) {
 	fs := flag.NewFlagSet("context", flag.ExitOnError)
 	limit := fs.Int("limit", 5, "Maximum results")
-	fs.Parse(args)
+	parseFlags(fs, args)
 
 	filePath := fs.Arg(0)
 	if filePath == "" {
