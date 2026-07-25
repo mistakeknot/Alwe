@@ -7,39 +7,44 @@ import (
 	"fmt"
 
 	"github.com/google/jsonschema-go/jsonschema"
-	"github.com/mistakeknot/Alwe/pkg/observer"
+	"github.com/mistakeknot/Alwe/pkg/sessionsearch"
 	gomcp "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Server wraps a CassObserver as an MCP server.
+// Server exposes session search as an MCP server.
 type Server struct {
-	mcp      *gomcp.Server
-	observer *observer.CassObserver
+	mcp    *gomcp.Server
+	search *sessionsearch.Service
 }
 
-// New creates an MCP sidecar server backed by CASS.
+// New creates an MCP sidecar server. It starts as long as at least one search
+// backend is reachable, so a missing or wedged cass no longer prevents the
+// server from coming up.
 func New() (*Server, error) {
-	obs, err := observer.New()
+	svc, err := sessionsearch.New()
 	if err != nil {
-		return nil, fmt.Errorf("cass observer: %w", err)
+		return nil, fmt.Errorf("session search: %w", err)
 	}
 
 	s := &Server{
 		mcp: gomcp.NewServer(
-			&gomcp.Implementation{Name: "alwe", Version: "0.1.0"},
+			&gomcp.Implementation{Name: "alwe", Version: "0.2.0"},
 			nil,
 		),
-		observer: obs,
+		search: svc,
 	}
 	s.registerTools()
 	return s, nil
 }
 
+// Close releases the server's backends.
+func (s *Server) Close() error { return s.search.Close() }
+
 func (s *Server) registerTools() {
 	s.mcp.AddTool(
 		&gomcp.Tool{
 			Name:        "search_sessions",
-			Description: "Search agent sessions by query. Optionally filter by agent connector (claude_code, codex, gemini, amp, etc.).",
+			Description: "Search agent sessions by query. Optionally filter by agent connector (claude_code, codex, gemini, amp, etc.). Merges cass and the local catalog; serves local-only results when cass is unavailable, flagged via the response's degraded/notice fields.",
 			InputSchema: &jsonschema.Schema{
 				Type: "object",
 				Properties: map[string]*jsonschema.Schema{
@@ -63,11 +68,11 @@ func (s *Server) registerTools() {
 			if limit == 0 {
 				limit = 5
 			}
-			results, err := s.observer.SearchSessions(ctx, in.Query, in.Connector, limit)
+			res, err := s.search.Search(ctx, in.Query, in.Connector, limit)
 			if err != nil {
 				return errResult(err.Error()), nil
 			}
-			out, _ := json.MarshalIndent(results, "", "  ")
+			out, _ := json.MarshalIndent(res, "", "  ")
 			return textResult(string(out)), nil
 		},
 	)
@@ -97,11 +102,11 @@ func (s *Server) registerTools() {
 			if limit == 0 {
 				limit = 5
 			}
-			results, err := s.observer.ContextForFile(ctx, in.FilePath, limit)
+			res, err := s.search.ContextForFile(ctx, in.FilePath, limit)
 			if err != nil {
 				return errResult(err.Error()), nil
 			}
-			out, _ := json.MarshalIndent(results, "", "  ")
+			out, _ := json.MarshalIndent(res, "", "  ")
 			return textResult(string(out)), nil
 		},
 	)
@@ -125,7 +130,7 @@ func (s *Server) registerTools() {
 			if err := json.Unmarshal(req.Params.Arguments, &in); err != nil {
 				return errResult("invalid input: " + err.Error()), nil
 			}
-			md, err := s.observer.ExportSession(ctx, in.SessionPath)
+			md, err := s.search.ExportSession(ctx, in.SessionPath)
 			if err != nil {
 				return errResult(err.Error()), nil
 			}
@@ -155,7 +160,7 @@ func (s *Server) registerTools() {
 			if since == "" {
 				since = "1h"
 			}
-			tl, err := s.observer.Timeline(ctx, since)
+			tl, err := s.search.Timeline(ctx, since)
 			if err != nil {
 				return errResult(err.Error()), nil
 			}
@@ -166,14 +171,12 @@ func (s *Server) registerTools() {
 	s.mcp.AddTool(
 		&gomcp.Tool{
 			Name:        "health",
-			Description: "Check if CASS is available and healthy.",
+			Description: "Report search backend availability (cass and local catalog), local catalog coverage, and the running binary build id.",
 			InputSchema: &jsonschema.Schema{Type: "object"},
 		},
 		func(ctx context.Context, req *gomcp.CallToolRequest) (*gomcp.CallToolResult, error) {
-			if s.observer.IsAvailable(ctx) {
-				return textResult(`{"healthy": true}`), nil
-			}
-			return textResult(`{"healthy": false}`), nil
+			out, _ := json.MarshalIndent(s.search.Health(ctx), "", "  ")
+			return textResult(string(out)), nil
 		},
 	)
 }

@@ -71,7 +71,10 @@ func (o *CassObserver) runCass(ctx context.Context, args ...string) ([]byte, err
 
 		_, retryable := retryableCassExit(err)
 		if !retryable || attempt == cassMaxAttempts {
-			return nil, annotateCassError(err, attempt)
+			// Return stdout alongside the error: cass still emits a JSON
+			// verdict on some non-zero exits (notably exit 1, "unhealthy"),
+			// and callers that can use it should not have to re-run cass.
+			return out, annotateCassError(err, attempt)
 		}
 
 		select {
@@ -121,6 +124,10 @@ type SessionResult struct {
 	FilePath  string  `json:"file_path"`
 	Snippet   string  `json:"snippet"`
 	Timestamp string  `json:"timestamp"`
+	// LineNumber locates the match within the transcript. Together with
+	// FilePath it identifies a hit, which is what lets cass and local results
+	// be merged without duplicates.
+	LineNumber int `json:"line_number"`
 }
 
 // searchResponse mirrors the current `cass search --json` envelope.
@@ -136,6 +143,7 @@ type searchHit struct {
 	SourcePath string  `json:"source_path"`
 	Agent      string  `json:"agent"`
 	CreatedAt  int64   `json:"created_at"` // ms epoch
+	LineNumber int     `json:"line_number"`
 }
 
 // toSessionResult maps a cass hit onto Alwe's SessionResult shape.
@@ -149,12 +157,13 @@ func (h searchHit) toSessionResult() SessionResult {
 		ts = time.UnixMilli(h.CreatedAt).UTC().Format(time.RFC3339)
 	}
 	return SessionResult{
-		SessionID: id,
-		Provider:  h.Agent,
-		Score:     h.Score,
-		FilePath:  h.SourcePath,
-		Snippet:   h.Snippet,
-		Timestamp: ts,
+		SessionID:  id,
+		Provider:   h.Agent,
+		Score:      h.Score,
+		FilePath:   h.SourcePath,
+		Snippet:    h.Snippet,
+		Timestamp:  ts,
+		LineNumber: h.LineNumber,
 	}
 }
 
@@ -338,10 +347,53 @@ func (o *CassObserver) Timeline(ctx context.Context, since string) (string, erro
 	return string(out), nil
 }
 
-// IsAvailable reports whether cass is installed and healthy. A non-retryable
-// non-zero exit (notably exit 1, cass's "unhealthy" verdict) is a real answer,
-// so it reports false rather than erroring; only lock/network contention is
-// retried, which stops a passing indexer from reading as an outage.
+// CassHealth is cass's self-report, separating two things that matter
+// independently.
+//
+// cass judges itself unhealthy when its lexical index is merely older than a
+// 300-second threshold, yet searches keep working fine in that state. Callers
+// need to know whether cass can answer (Reachable) apart from whether cass
+// considers itself fresh (Healthy), or a routinely-stale index reads as an
+// outage.
+type CassHealth struct {
+	// Reachable means the binary ran and produced a verdict.
+	Reachable bool `json:"reachable"`
+	// Healthy is cass's own readiness verdict.
+	Healthy bool `json:"healthy"`
+	// Errors carries cass's stated problems, e.g. "index stale".
+	Errors []string `json:"errors,omitempty"`
+	// RecommendedAction is cass's own suggested remedy, when it offers one.
+	RecommendedAction string `json:"recommended_action,omitempty"`
+}
+
+// HealthReport probes cass and reports both reachability and its self-verdict.
+func (o *CassObserver) HealthReport(ctx context.Context) CassHealth {
+	out, err := o.runCass(ctx, "health", "--json")
+
+	var status struct {
+		Healthy           bool     `json:"healthy"`
+		Errors            []string `json:"errors"`
+		RecommendedAction string   `json:"recommended_action"`
+	}
+	// cass prints its verdict even when exiting non-zero, so parse first and
+	// let a successful parse establish reachability.
+	if jsonErr := json.Unmarshal(out, &status); jsonErr == nil {
+		return CassHealth{
+			Reachable:         true,
+			Healthy:           status.Healthy,
+			Errors:            status.Errors,
+			RecommendedAction: status.RecommendedAction,
+		}
+	}
+	if err == nil {
+		// Ran cleanly but produced output we could not parse.
+		return CassHealth{Reachable: true}
+	}
+	return CassHealth{Reachable: false, Errors: []string{err.Error()}}
+}
+
+// IsAvailable reports whether cass is installed and considers itself healthy.
+// Prefer HealthReport when a stale-but-usable cass should not read as absent.
 func (o *CassObserver) IsAvailable(ctx context.Context) bool {
 	out, err := o.runCass(ctx, "health", "--json")
 	if err != nil {
