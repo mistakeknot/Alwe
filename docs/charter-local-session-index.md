@@ -98,6 +98,8 @@ Extend it:
    `checkpoint.db_matches: true` while `cass search` reports the storage
    fingerprint no longer matches. That contradiction is why the repair defers
    forever. Not covered by the closed #244 / #258.
+   **Filed 2026-07-24:**
+   https://github.com/Dicklesworthstone/coding_agent_session_search/issues/353
 
 ## Tradeoffs (accepted)
 
