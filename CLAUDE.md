@@ -59,6 +59,12 @@ internal/
 - **Timeline windows on transcript mtime**, which is numeric, indexed, and the
   honest signal — a transcript is only written while its session runs. Message
   timestamps then come from the catalog by rowid range.
+- **The catalog needs a scheduler to be trustworthy.** Nothing in the binary
+  keeps it fresh; `ops/com.arouth.alwe-index.plist` runs `alwe index` every 300s.
+  The interval is measured (~80ms no-op, ~83ms per changed file over 9,647
+  transcripts = 0.4% duty cycle), not assumed — re-measure before changing it.
+  `health` reports `local_stale` past 600s (2x the interval) so a stopped
+  indexer is visible; one missed run is not an alarm.
 - **Real-data tests are load-bearing.** `pkg/sessionsearch/realdata_test.go`
   asserts coordinate agreement against actual transcripts. Three defects once
   survived a green synthetic suite; do not delete these because they skip on a

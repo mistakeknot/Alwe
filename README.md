@@ -74,9 +74,23 @@ skipped, and a changed file is re-indexed alone. There is no global fingerprint
 and no full-rebuild concept, so a single drifted transcript costs milliseconds
 rather than a whole-corpus rebuild.
 
+Keep it current on a schedule. A sample launchd agent is in
+`ops/com.arouth.alwe-index.plist` (5-minute interval):
+
+```bash
+cp ops/com.arouth.alwe-index.plist ~/Library/LaunchAgents/   # edit paths first
+launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.arouth.alwe-index.plist
+```
+
+Measured cost on 9,647 transcripts: ~80ms when nothing changed, ~83ms per
+changed file. `alwe health` reports `local_stale` once the catalog is older than
+`ALWE_INDEX_STALE_THRESHOLD`, so a stopped or wedged indexer surfaces instead of
+silently serving stale results.
+
 | Environment | Purpose |
 |---|---|
 | `ALWE_INDEX_DB` | Catalog path (default: `<user cache>/alwe/sessions.db`) |
+| `ALWE_INDEX_STALE_THRESHOLD` | Seconds before `health` reports `local_stale` (default 600, i.e. 2x the scheduled refresh interval) |
 | `ALWE_CASS_STALE_THRESHOLD` | Seconds of lexical staleness Alwe asks cass to judge itself against (default 1800, matching cass's own `status` threshold; cass `health` defaults to a stricter 300) |
 
 ## Supported Agents (via CASS)

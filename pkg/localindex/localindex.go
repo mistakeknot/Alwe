@@ -73,7 +73,10 @@ type Coverage struct {
 	Messages    int    `json:"messages"`
 	NewestTS    string `json:"newest_timestamp,omitempty"`
 	LastIndexed string `json:"last_indexed_at,omitempty"`
-	DBPath      string `json:"db_path"`
+	// LastIndexedUnix is the same instant in epoch seconds, so callers can age
+	// it without reparsing. Zero when nothing has been indexed yet.
+	LastIndexedUnix int64  `json:"last_indexed_unix,omitempty"`
+	DBPath          string `json:"db_path"`
 }
 
 const schema = `
@@ -424,6 +427,7 @@ func (ix *Index) Coverage(ctx context.Context) (Coverage, error) {
 	}
 	if lastIdxMS.Valid {
 		cov.LastIndexed = time.UnixMilli(lastIdxMS.Int64).UTC().Format(time.RFC3339)
+		cov.LastIndexedUnix = lastIdxMS.Int64 / 1000
 	}
 	return cov, nil
 }

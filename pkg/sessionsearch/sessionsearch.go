@@ -13,7 +13,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"time"
 
@@ -245,11 +247,19 @@ type Health struct {
 	Degraded bool `json:"degraded"`
 	// ReducedRanking flags that results come from the weaker-ranked backend
 	// only — real information, but not a capability loss.
-	ReducedRanking bool                 `json:"reduced_ranking,omitempty"`
-	Notice         string               `json:"notice,omitempty"`
-	Coverage       *localindex.Coverage `json:"local_coverage,omitempty"`
-	BuildID        string               `json:"build_id,omitempty"`
-	BuildModule    string               `json:"build_module,omitempty"`
+	ReducedRanking bool `json:"reduced_ranking,omitempty"`
+	// LocalStale means the catalog has not been refreshed within its expected
+	// window. Without this a wedged or unloaded indexer is invisible: searches
+	// keep succeeding against progressively older data.
+	LocalStale bool `json:"local_stale,omitempty"`
+	// LocalAgeSeconds is how long since the catalog was last refreshed.
+	LocalAgeSeconds int64 `json:"local_age_seconds,omitempty"`
+	// LocalStaleThresholdSeconds is the window used for that judgement.
+	LocalStaleThresholdSeconds int                  `json:"local_stale_threshold_seconds,omitempty"`
+	Notice                     string               `json:"notice,omitempty"`
+	Coverage                   *localindex.Coverage `json:"local_coverage,omitempty"`
+	BuildID                    string               `json:"build_id,omitempty"`
+	BuildModule                string               `json:"build_module,omitempty"`
 }
 
 // Health probes the backends.
@@ -285,10 +295,57 @@ func (s *Service) Health(ctx context.Context) Health {
 	if s.local != nil {
 		if cov, err := s.local.Coverage(ctx); err == nil {
 			h.Coverage = &cov
+			h.LocalStaleThresholdSeconds = localStaleThresholdSecs()
+			if cov.LastIndexedUnix > 0 {
+				h.LocalAgeSeconds = s.now().Unix() - cov.LastIndexedUnix
+				if h.LocalAgeSeconds < 0 {
+					h.LocalAgeSeconds = 0
+				}
+				h.LocalStale = h.LocalAgeSeconds > int64(h.LocalStaleThresholdSeconds)
+			} else {
+				// Never indexed at all: stale by definition, and the more urgent
+				// case since there is nothing to fall back to.
+				h.LocalStale = true
+			}
+			if h.LocalStale {
+				h.Notice = appendNotice(h.Notice, staleCatalogNotice(h))
+			}
 		}
 	}
 	h.BuildID, h.BuildModule = buildInfo()
 	return h
+}
+
+// defaultLocalStaleThresholdSecs is twice the scheduled refresh interval, so a
+// single missed run does not raise an alarm but a stopped or wedged indexer
+// does. The scheduled interval is 300s (see docs/charter-local-session-index.md).
+const defaultLocalStaleThresholdSecs = 600
+
+// localStaleThresholdSecs is the catalog-staleness window, overridable with
+// ALWE_INDEX_STALE_THRESHOLD (seconds) for hosts on a different cadence.
+func localStaleThresholdSecs() int {
+	if v := os.Getenv("ALWE_INDEX_STALE_THRESHOLD"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return defaultLocalStaleThresholdSecs
+}
+
+func staleCatalogNotice(h Health) string {
+	if h.Coverage != nil && h.Coverage.LastIndexedUnix == 0 {
+		return "local catalog has never been indexed — run `alwe index`"
+	}
+	return fmt.Sprintf(
+		"local catalog last refreshed %ds ago, past its %ds window — the indexer may be stopped or wedged; run `alwe index`",
+		h.LocalAgeSeconds, h.LocalStaleThresholdSeconds)
+}
+
+func appendNotice(existing, add string) string {
+	if existing == "" {
+		return add
+	}
+	return existing + "; " + add
 }
 
 // merge runs the available backends and combines their hits.

@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.arouth.alwe-index</string>
+
+    <!-- Keeps the local session catalog current so Alwe's cass fallback is
+         trustworthy rather than incidentally fresh.
+
+         StartInterval 300s is measured, not assumed: a warm `alwe index` over
+         9,647 transcripts costs ~80ms when nothing changed and ~83ms per
+         changed file. At the observed ~2.7 changed transcripts/minute, a 300s
+         run touches ~13 files for ~1.2s total — a 0.4% duty cycle. For
+         comparison, the cass indexer costs 51.5s every 900s (5.7%).
+
+         300s also keeps the catalog at most 5 minutes behind, which is fresher
+         than the cass lexical index it backstops. `alwe health` reports
+         local_stale past a 600s window (2x this interval), so one missed run is
+         tolerated but a stopped or wedged indexer surfaces. -->
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/sma/.local/bin/alwe</string>
+        <string>index</string>
+        <string>--quiet</string>
+    </array>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/Users/sma/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <key>HOME</key>
+        <string>/Users/sma</string>
+    </dict>
+
+    <key>StartInterval</key>
+    <integer>300</integer>
+
+    <!-- Indexing is I/O bound over the transcript tree; yield to interactive
+         work rather than competing with it. -->
+    <key>Nice</key>
+    <integer>5</integer>
+    <key>LowPriorityIO</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/sma/.local/log/alwe-index-stdout.log</string>
+    <key>StandardErrorPath</key>
+    <string>/Users/sma/.local/log/alwe-index-stderr.log</string>
+</dict>
+</plist>

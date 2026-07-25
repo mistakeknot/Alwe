@@ -601,3 +601,120 @@ func TestHealth_StaleCassIsReachableNotAbsent(t *testing.T) {
 		t.Error("both backends usable means healthy")
 	}
 }
+
+// Condition 5's point: a stopped or wedged indexer must be detectable. Without
+// this signal, searches keep succeeding against progressively older data and
+// nothing says so.
+func TestHealth_DetectsStaleLocalCatalog(t *testing.T) {
+	local, _ := localWithMtime(t, "sess-stale-cat", time.Now(), "content")
+
+	// Fresh: the catalog was just indexed.
+	fresh, err := New(WithLocal(local), WithClock(time.Now))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	fresh.cass = nil
+	h := fresh.Health(context.Background())
+	if h.LocalStale {
+		t.Errorf("a just-indexed catalog must not be stale: age=%ds threshold=%ds",
+			h.LocalAgeSeconds, h.LocalStaleThresholdSeconds)
+	}
+	if h.LocalStaleThresholdSeconds != defaultLocalStaleThresholdSecs {
+		t.Errorf("threshold = %d, want %d", h.LocalStaleThresholdSeconds, defaultLocalStaleThresholdSecs)
+	}
+
+	// Advance the clock past the window: the indexer has evidently stopped.
+	future := time.Now().Add(time.Duration(defaultLocalStaleThresholdSecs+100) * time.Second)
+	stale, err := New(WithLocal(local), WithClock(func() time.Time { return future }))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	stale.cass = nil
+	h = stale.Health(context.Background())
+	if !h.LocalStale {
+		t.Fatalf("catalog %ds old should be stale past a %ds window",
+			h.LocalAgeSeconds, h.LocalStaleThresholdSeconds)
+	}
+	if h.LocalAgeSeconds < int64(defaultLocalStaleThresholdSecs) {
+		t.Errorf("age = %ds, expected more than the threshold", h.LocalAgeSeconds)
+	}
+	if !strings.Contains(h.Notice, "alwe index") {
+		t.Errorf("notice %q should name the remedy", h.Notice)
+	}
+	if !strings.Contains(h.Notice, "wedged") && !strings.Contains(h.Notice, "stopped") {
+		t.Errorf("notice %q should say the indexer may have stopped", h.Notice)
+	}
+	// Staleness is not a capability loss: the catalog still answers.
+	if h.Degraded {
+		t.Error("a stale-but-readable catalog is not a capability loss")
+	}
+	if !h.Healthy {
+		t.Error("a stale catalog still answers queries, so healthy stays true")
+	}
+}
+
+func TestHealth_NeverIndexedCatalogIsStale(t *testing.T) {
+	ix, err := localindex.Open(filepath.Join(t.TempDir(), "empty.db"))
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	t.Cleanup(func() { ix.Close() })
+
+	svc, err := New(WithLocal(ix))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	svc.cass = nil
+
+	h := svc.Health(context.Background())
+	if !h.LocalStale {
+		t.Error("a catalog that has never been indexed must report stale")
+	}
+	if !strings.Contains(h.Notice, "never been indexed") {
+		t.Errorf("notice %q should distinguish never-indexed from merely old", h.Notice)
+	}
+}
+
+func TestLocalStaleThresholdSecs_Override(t *testing.T) {
+	t.Setenv("ALWE_INDEX_STALE_THRESHOLD", "")
+	if got := localStaleThresholdSecs(); got != defaultLocalStaleThresholdSecs {
+		t.Errorf("default = %d, want %d", got, defaultLocalStaleThresholdSecs)
+	}
+	t.Setenv("ALWE_INDEX_STALE_THRESHOLD", "120")
+	if got := localStaleThresholdSecs(); got != 120 {
+		t.Errorf("override = %d, want 120", got)
+	}
+	for _, bad := range []string{"soon", "0", "-1"} {
+		t.Setenv("ALWE_INDEX_STALE_THRESHOLD", bad)
+		if got := localStaleThresholdSecs(); got != defaultLocalStaleThresholdSecs {
+			t.Errorf("value %q = %d, want the default", bad, got)
+		}
+	}
+}
+
+// Both signals can fire at once and must both survive into the notice.
+func TestHealth_StaleCatalogAndCassComplaintBothReported(t *testing.T) {
+	local, _ := localWithMtime(t, "sess-both", time.Now(), "content")
+	verdict := `{"healthy":false,"errors":["index stale"]}`
+	future := time.Now().Add(time.Duration(defaultLocalStaleThresholdSecs+100) * time.Second)
+
+	svc, err := New(
+		WithCass(cassObserverAt(t, fakeCassVerdict(t, 1, verdict))),
+		WithLocal(local),
+		WithClock(func() time.Time { return future }),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	h := svc.Health(context.Background())
+	if !h.LocalStale {
+		t.Error("catalog should be stale")
+	}
+	if !strings.Contains(h.Notice, "cass is reachable but reports") {
+		t.Errorf("notice %q lost cass's complaint", h.Notice)
+	}
+	if !strings.Contains(h.Notice, "local catalog last refreshed") {
+		t.Errorf("notice %q lost the catalog staleness", h.Notice)
+	}
+}
