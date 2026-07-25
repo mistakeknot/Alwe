@@ -245,12 +245,37 @@ func TestRunCass_DoesNotRetryNonRetryable(t *testing.T) {
 	}
 }
 
-func TestIsAvailable_SurvivesIndexerLock(t *testing.T) {
-	// Regression: a passing `cass index` used to make health report false.
+// Regression, carried over from the deleted IsAvailable: a passing `cass index`
+// used to make the health probe report false. The surviving path must retry
+// through lock contention and land on cass's real verdict.
+func TestHealthReport_SurvivesIndexerLock(t *testing.T) {
 	o := &CassObserver{cassPath: fakeCass(t, 7, 2, `{"healthy":true}`)}
 
-	if !o.IsAvailable(context.Background()) {
-		t.Error("IsAvailable should retry through lock contention and report true")
+	got := o.HealthReport(context.Background())
+	if !got.Reachable {
+		t.Error("HealthReport should retry through lock contention and report reachable")
+	}
+	if !got.Healthy {
+		t.Errorf("cass reported healthy after the lock cleared, got %+v", got)
+	}
+}
+
+// The property the deleted IsAvailable got wrong: a stale cass is still usable.
+// It collapsed cass's verdict into one bool and probed at the strict 300s
+// default, so a routinely-stale-but-working cass read as absent.
+func TestHealthReport_StaleCassIsStillUsable(t *testing.T) {
+	stale := `{"healthy":false,"errors":["index stale"],"recommended_action":"run cass index"}`
+	o := &CassObserver{cassPath: fakeCass(t, 0, 0, stale)}
+
+	got := o.HealthReport(context.Background())
+	if !got.Reachable {
+		t.Fatal("a stale cass that answers is reachable and must be used, not skipped")
+	}
+	if got.Healthy {
+		t.Error("cass's own unhealthy verdict must be preserved, not overwritten")
+	}
+	if len(got.Errors) == 0 || got.Errors[0] != "index stale" {
+		t.Errorf("errors = %v, want cass's stated problem", got.Errors)
 	}
 }
 

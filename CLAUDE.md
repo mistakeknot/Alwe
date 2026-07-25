@@ -37,9 +37,11 @@ internal/
   and 7 retryable; `observer.runCass` retries those with backoff and treats
   everything else as terminal. Do not collapse non-zero exits into one error.
 - **cass health != cass usable.** cass calls itself unhealthy when its index is
-  merely past a 300s staleness threshold, while still searching fine. Use
-  `observer.HealthReport` (reachable vs. self-verdict), not `IsAvailable`, when
-  a stale cass should not read as absent. `HealthReport` asks cass to judge
+  merely past a 300s staleness threshold, while still searching fine. Decide
+  from `observer.HealthReport`'s `Reachable` vs. `Healthy`; there is
+  deliberately no `IsAvailable`-style bool, because one bit cannot express that
+  state without lying (the old one also probed at cass's strict 300s default and
+  so returned false for most of every cycle). `HealthReport` asks cass to judge
   against 1800s — the threshold cass's own `status` surface uses — because an
   incremental `cass index` measures ~51s and is scheduled every 900s, so the
   300s default marks cass unhealthy for most of every cycle. Tightening the

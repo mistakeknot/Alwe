@@ -417,21 +417,13 @@ func (o *CassObserver) HealthReport(ctx context.Context) CassHealth {
 	return CassHealth{Reachable: false, Errors: []string{err.Error()}}
 }
 
-// IsAvailable reports whether cass is installed and considers itself healthy.
-// Prefer HealthReport when a stale-but-usable cass should not read as absent.
-func (o *CassObserver) IsAvailable(ctx context.Context) bool {
-	out, err := o.runCass(ctx, "health", "--json")
-	if err != nil {
-		return false
-	}
-	var status struct {
-		Healthy bool `json:"healthy"`
-	}
-	if err := json.Unmarshal(out, &status); err != nil {
-		return false
-	}
-	return status.Healthy
-}
+// There is deliberately no IsAvailable helper. A single bool cannot express
+// cass's state without lying: cass reports itself unhealthy when its index is
+// merely past a staleness threshold, while still answering every query. The
+// removed version also probed at cass's strict 300s default, so on a 900s
+// indexing cadence it returned false for most of every cycle and callers read a
+// routine state as an outage. Use HealthReport and decide from Reachable vs.
+// Healthy.
 
 func truncate(s string, n int) string {
 	if len(s) <= n {
