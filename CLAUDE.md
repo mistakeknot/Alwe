@@ -39,7 +39,12 @@ internal/
 - **cass health != cass usable.** cass calls itself unhealthy when its index is
   merely past a 300s staleness threshold, while still searching fine. Use
   `observer.HealthReport` (reachable vs. self-verdict), not `IsAvailable`, when
-  a stale cass should not read as absent.
+  a stale cass should not read as absent. `HealthReport` asks cass to judge
+  against 1800s — the threshold cass's own `status` surface uses — because an
+  incremental `cass index` measures ~51s and is scheduled every 900s, so the
+  300s default marks cass unhealthy for most of every cycle. Tightening the
+  schedule to fit 300s would hold the index lock ~51s of every 300s; measure
+  before shortening a period. Override with `ALWE_CASS_STALE_THRESHOLD`.
 - **Backend scores are not comparable.** cass reports corpus-wide BM25 in the
   tens; FTS5 inverted rank lands near zero. Merge with reciprocal rank fusion,
   never by sorting raw scores together.

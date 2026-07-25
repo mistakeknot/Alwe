@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 )
@@ -366,9 +367,33 @@ type CassHealth struct {
 	RecommendedAction string `json:"recommended_action,omitempty"`
 }
 
+// defaultStaleThresholdSecs is the lexical-staleness window Alwe asks cass to
+// judge itself against.
+//
+// cass health defaults to 300s, but a full incremental `cass index` on a
+// ~500k-message corpus measures ~51s and is typically scheduled every 900s, so
+// the default marks cass unhealthy for most of every cycle while search works
+// perfectly. Tightening the schedule to fit 300s would hold the index lock ~51s
+// out of every 300s — trading a cosmetic signal for real contention. Instead we
+// judge against 1800s, which is the threshold cass's own `status` surface
+// already uses. Override with ALWE_CASS_STALE_THRESHOLD (seconds).
+const defaultStaleThresholdSecs = 1800
+
+// staleThresholdArg returns the --stale-threshold argument pair for cass health.
+func staleThresholdArg() []string {
+	secs := defaultStaleThresholdSecs
+	if v := os.Getenv("ALWE_CASS_STALE_THRESHOLD"); v != "" {
+		if parsed, err := strconv.Atoi(v); err == nil && parsed > 0 {
+			secs = parsed
+		}
+	}
+	return []string{"--stale-threshold", strconv.Itoa(secs)}
+}
+
 // HealthReport probes cass and reports both reachability and its self-verdict.
 func (o *CassObserver) HealthReport(ctx context.Context) CassHealth {
-	out, err := o.runCass(ctx, "health", "--json")
+	args := append([]string{"health", "--json"}, staleThresholdArg()...)
+	out, err := o.runCass(ctx, args...)
 
 	var status struct {
 		Healthy           bool     `json:"healthy"`

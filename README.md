@@ -71,6 +71,7 @@ rather than a whole-corpus rebuild.
 | Environment | Purpose |
 |---|---|
 | `ALWE_INDEX_DB` | Catalog path (default: `<user cache>/alwe/sessions.db`) |
+| `ALWE_CASS_STALE_THRESHOLD` | Seconds of lexical staleness Alwe asks cass to judge itself against (default 1800, matching cass's own `status` threshold; cass `health` defaults to a stricter 300) |
 
 ## Supported Agents (via CASS)
 

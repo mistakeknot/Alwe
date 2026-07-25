@@ -253,3 +253,58 @@ func TestIsAvailable_SurvivesIndexerLock(t *testing.T) {
 		t.Error("IsAvailable should retry through lock contention and report true")
 	}
 }
+
+func TestStaleThresholdArg(t *testing.T) {
+	// Default aligns with cass's own `status` threshold, not health's stricter
+	// 300s: a ~51s incremental index on a 900s schedule would otherwise mark
+	// cass unhealthy for most of every cycle while search works fine.
+	t.Setenv("ALWE_CASS_STALE_THRESHOLD", "")
+	got := staleThresholdArg()
+	if len(got) != 2 || got[0] != "--stale-threshold" || got[1] != "1800" {
+		t.Errorf("default = %v, want [--stale-threshold 1800]", got)
+	}
+
+	t.Setenv("ALWE_CASS_STALE_THRESHOLD", "600")
+	if got := staleThresholdArg(); got[1] != "600" {
+		t.Errorf("override = %v, want 600", got)
+	}
+
+	// Garbage and non-positive values fall back rather than passing nonsense
+	// through to cass.
+	for _, bad := range []string{"abc", "0", "-5"} {
+		t.Setenv("ALWE_CASS_STALE_THRESHOLD", bad)
+		if got := staleThresholdArg(); got[1] != "1800" {
+			t.Errorf("value %q = %v, want the default", bad, got)
+		}
+	}
+}
+
+func TestHealthReport_SeparatesReachableFromVerdict(t *testing.T) {
+	// cass answered with an unhealthy verdict: reachable, but its own judgement
+	// must be preserved rather than collapsed into "unavailable". (The
+	// exit-1-with-body variant is covered in pkg/sessionsearch.)
+	script := fakeCass(t, 0, 0, `{"healthy":false,"errors":["index stale"],"recommended_action":"run cass index"}`)
+	o := &CassObserver{cassPath: script}
+
+	got := o.HealthReport(context.Background())
+	if !got.Reachable {
+		t.Error("cass answered, so it must be reachable")
+	}
+	if got.Healthy {
+		t.Error("cass's own verdict was unhealthy and must be preserved")
+	}
+	if len(got.Errors) == 0 || got.Errors[0] != "index stale" {
+		t.Errorf("errors = %v, want cass's stated problem", got.Errors)
+	}
+	if got.RecommendedAction == "" {
+		t.Error("cass's recommended action should be surfaced")
+	}
+}
+
+func TestHealthReport_UnreachableWhenCassCannotRun(t *testing.T) {
+	o := &CassObserver{cassPath: filepath.Join(t.TempDir(), "does-not-exist")}
+	got := o.HealthReport(context.Background())
+	if got.Reachable || got.Healthy {
+		t.Errorf("expected unreachable+unhealthy, got %+v", got)
+	}
+}
