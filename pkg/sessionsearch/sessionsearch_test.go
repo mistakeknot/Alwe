@@ -718,3 +718,40 @@ func TestHealth_StaleCatalogAndCassComplaintBothReported(t *testing.T) {
 		t.Errorf("notice %q lost the catalog staleness", h.Notice)
 	}
 }
+
+// A just-refreshed catalog is age 0, which must serialise as 0 rather than be
+// omitted — otherwise the healthiest possible answer renders as null and reads
+// as "not computed".
+func TestHealth_ZeroAgeSerialisesAsZero(t *testing.T) {
+	local, _ := localWithMtime(t, "sess-zero", time.Now(), "content")
+	fixed := time.Now()
+
+	svc, err := New(WithLocal(local), WithClock(func() time.Time { return fixed }))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	svc.cass = nil
+
+	h := svc.Health(context.Background())
+	// Force the just-indexed case regardless of test timing.
+	h.LocalAgeSeconds = 0
+
+	b, err := json.Marshal(h)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(b, &decoded); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	v, present := decoded["local_age_seconds"]
+	if !present {
+		t.Fatal("local_age_seconds omitted at age 0; it must render as 0")
+	}
+	if v == nil {
+		t.Errorf("local_age_seconds = null at age 0, want 0")
+	}
+	if f, ok := v.(float64); !ok || f != 0 {
+		t.Errorf("local_age_seconds = %v, want 0", v)
+	}
+}

@@ -253,7 +253,11 @@ type Health struct {
 	// keep succeeding against progressively older data.
 	LocalStale bool `json:"local_stale,omitempty"`
 	// LocalAgeSeconds is how long since the catalog was last refreshed.
-	LocalAgeSeconds int64 `json:"local_age_seconds,omitempty"`
+	//
+	// Deliberately not omitempty: a just-refreshed catalog is legitimately 0,
+	// and omitting it would render as null — indistinguishable from "not
+	// computed". Age 0 is the healthiest possible answer and must be visible.
+	LocalAgeSeconds int64 `json:"local_age_seconds"`
 	// LocalStaleThresholdSeconds is the window used for that judgement.
 	LocalStaleThresholdSeconds int                  `json:"local_stale_threshold_seconds,omitempty"`
 	Notice                     string               `json:"notice,omitempty"`
