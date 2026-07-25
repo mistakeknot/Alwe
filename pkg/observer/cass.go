@@ -5,6 +5,7 @@ import (
 	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -37,6 +38,79 @@ func New() (*CassObserver, error) {
 		return nil, fmt.Errorf("cass not found in PATH: %w", err)
 	}
 	return &CassObserver{cassPath: path}, nil
+}
+
+// retryableCassExits are the exit codes cass declares as transient in its
+// capability contract (`cass capabilities --json | jq .exit_codes`). Exit 7 is
+// the common one: a scheduled `cass index` run owns the index lock, and cass's
+// documented remedy is "retry later with bounded backoff" — not failing the
+// caller. Treating it as fatal made routine indexer overlap look like an
+// outage.
+var retryableCassExits = map[int]string{
+	4: "network error",
+	7: "lock or busy",
+}
+
+const (
+	cassMaxAttempts = 4
+	cassBaseBackoff = 250 * time.Millisecond
+)
+
+// runCass executes cass and returns its stdout, retrying the exit codes cass
+// marks retryable with exponential backoff. Other failures return immediately
+// with the exit code and stderr attached so callers surface something
+// actionable instead of a bare "exit status N".
+func (o *CassObserver) runCass(ctx context.Context, args ...string) ([]byte, error) {
+	backoff := cassBaseBackoff
+
+	for attempt := 1; ; attempt++ {
+		out, err := exec.CommandContext(ctx, o.cassPath, args...).Output()
+		if err == nil {
+			return out, nil
+		}
+
+		_, retryable := retryableCassExit(err)
+		if !retryable || attempt == cassMaxAttempts {
+			return nil, annotateCassError(err, attempt)
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoff):
+		}
+		backoff *= 2
+	}
+}
+
+// retryableCassExit reports whether err is a cass exit that is worth retrying.
+func retryableCassExit(err error) (string, bool) {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return "", false
+	}
+	reason, ok := retryableCassExits[exitErr.ExitCode()]
+	return reason, ok
+}
+
+// annotateCassError turns an opaque "exit status N" into something a caller
+// (or an agent reading the MCP error) can act on.
+func annotateCassError(err error, attempts int) error {
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) {
+		return err
+	}
+
+	code := exitErr.ExitCode()
+	detail := truncate(strings.TrimSpace(string(exitErr.Stderr)), 300)
+
+	if reason, ok := retryableCassExits[code]; ok {
+		return fmt.Errorf("exit %d (%s) after %d attempts: %s", code, reason, attempts, detail)
+	}
+	if detail == "" {
+		return fmt.Errorf("exit %d", code)
+	}
+	return fmt.Errorf("exit %d: %s", code, detail)
 }
 
 // SessionResult is a cass search hit.
@@ -107,8 +181,7 @@ func (o *CassObserver) SearchSessions(ctx context.Context, query string, connect
 		args = append(args, "--agent", connector)
 	}
 
-	cmd := exec.CommandContext(ctx, o.cassPath, args...)
-	out, err := cmd.Output()
+	out, err := o.runCass(ctx, args...)
 	if err != nil {
 		return nil, fmt.Errorf("cass search: %w", err)
 	}
@@ -129,8 +202,7 @@ func (o *CassObserver) ContextForFile(ctx context.Context, filePath string, limi
 		args = append(args, "--limit", fmt.Sprintf("%d", limit))
 	}
 
-	cmd := exec.CommandContext(ctx, o.cassPath, args...)
-	out, err := cmd.Output()
+	out, err := o.runCass(ctx, args...)
 	if err != nil {
 		return nil, fmt.Errorf("cass context: %w", err)
 	}
@@ -144,8 +216,7 @@ func (o *CassObserver) ContextForFile(ctx context.Context, filePath string, limi
 
 // ExportSession exports a session to structured text.
 func (o *CassObserver) ExportSession(ctx context.Context, sessionPath string) (string, error) {
-	cmd := exec.CommandContext(ctx, o.cassPath, "export", sessionPath, "--format", "markdown")
-	out, err := cmd.Output()
+	out, err := o.runCass(ctx, "export", sessionPath, "--format", "markdown")
 	if err != nil {
 		return "", fmt.Errorf("cass export: %w", err)
 	}
@@ -260,18 +331,19 @@ func (o *CassObserver) Timeline(ctx context.Context, since string) (string, erro
 		args = append(args, "--since", since)
 	}
 
-	cmd := exec.CommandContext(ctx, o.cassPath, args...)
-	out, err := cmd.Output()
+	out, err := o.runCass(ctx, args...)
 	if err != nil {
 		return "", fmt.Errorf("cass timeline: %w", err)
 	}
 	return string(out), nil
 }
 
-// IsAvailable reports whether cass is installed and healthy.
+// IsAvailable reports whether cass is installed and healthy. A non-retryable
+// non-zero exit (notably exit 1, cass's "unhealthy" verdict) is a real answer,
+// so it reports false rather than erroring; only lock/network contention is
+// retried, which stops a passing indexer from reading as an outage.
 func (o *CassObserver) IsAvailable(ctx context.Context) bool {
-	cmd := exec.CommandContext(ctx, o.cassPath, "health", "--json")
-	out, err := cmd.Output()
+	out, err := o.runCass(ctx, "health", "--json")
 	if err != nil {
 		return false
 	}

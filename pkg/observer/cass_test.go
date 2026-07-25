@@ -1,7 +1,12 @@
 package observer
 
 import (
+	"context"
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -156,5 +161,95 @@ func TestTruncate(t *testing.T) {
 	}
 	if got := truncate("hello world", 5); got != "hello..." {
 		t.Errorf("long string: got %q", got)
+	}
+}
+
+// fakeCass writes a script standing in for the cass binary. It exits with
+// exitCode for the first failCount invocations (tracked via a counter file),
+// then prints stdout and succeeds.
+func fakeCass(t *testing.T, exitCode, failCount int, stdout string) string {
+	t.Helper()
+	dir := t.TempDir()
+	script := filepath.Join(dir, "cass")
+	counter := filepath.Join(dir, "n")
+
+	body := fmt.Sprintf(`#!/bin/sh
+n=0
+[ -f %[1]q ] && n=$(cat %[1]q)
+n=$((n+1))
+echo "$n" > %[1]q
+if [ "$n" -le %[2]d ]; then
+  echo "index-run.lock held by pid 999" >&2
+  exit %[3]d
+fi
+printf '%%s' %[4]q
+`, counter, failCount, exitCode, stdout)
+
+	if err := os.WriteFile(script, []byte(body), 0o755); err != nil {
+		t.Fatalf("write fake cass: %v", err)
+	}
+	return script
+}
+
+func TestRunCass_RetriesLockBusy(t *testing.T) {
+	// Exit 7 ("lock or busy") is retryable: two failures then success.
+	o := &CassObserver{cassPath: fakeCass(t, 7, 2, `{"healthy":true}`)}
+
+	out, err := o.runCass(context.Background(), "health", "--json")
+	if err != nil {
+		t.Fatalf("expected retry to succeed, got %v", err)
+	}
+	if string(out) != `{"healthy":true}` {
+		t.Errorf("got stdout %q", out)
+	}
+}
+
+func TestRunCass_GivesUpAfterMaxAttempts(t *testing.T) {
+	// Always busy: error must name the exit code, reason, and attempt count.
+	o := &CassObserver{cassPath: fakeCass(t, 7, 99, "")}
+
+	_, err := o.runCass(context.Background(), "search", "q")
+	if err == nil {
+		t.Fatal("expected error when lock never releases")
+	}
+	for _, want := range []string{"exit 7", "lock or busy", fmt.Sprintf("%d attempts", cassMaxAttempts)} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("error %q missing %q", err, want)
+		}
+	}
+}
+
+func TestRunCass_DoesNotRetryNonRetryable(t *testing.T) {
+	// Exit 1 is cass's "unhealthy" verdict — a real answer, not contention.
+	// It must be returned on the first attempt, with stderr attached.
+	script := fakeCass(t, 1, 99, "")
+	o := &CassObserver{cassPath: script}
+
+	_, err := o.runCass(context.Background(), "health", "--json")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "exit 1") {
+		t.Errorf("error %q should name exit 1", err)
+	}
+	if strings.Contains(err.Error(), "attempts") {
+		t.Errorf("error %q should not report retries for a non-retryable code", err)
+	}
+
+	n, err := os.ReadFile(filepath.Join(filepath.Dir(script), "n"))
+	if err != nil {
+		t.Fatalf("read counter: %v", err)
+	}
+	if strings.TrimSpace(string(n)) != "1" {
+		t.Errorf("cass ran %s times, want 1", strings.TrimSpace(string(n)))
+	}
+}
+
+func TestIsAvailable_SurvivesIndexerLock(t *testing.T) {
+	// Regression: a passing `cass index` used to make health report false.
+	o := &CassObserver{cassPath: fakeCass(t, 7, 2, `{"healthy":true}`)}
+
+	if !o.IsAvailable(context.Background()) {
+		t.Error("IsAvailable should retry through lock contention and report true")
 	}
 }
