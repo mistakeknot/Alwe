@@ -114,7 +114,7 @@ func (s *Server) registerTools() {
 	s.mcp.AddTool(
 		&gomcp.Tool{
 			Name:        "export_session",
-			Description: "Export an agent session to markdown format.",
+			Description: "Export an agent session to markdown format. Falls back to rendering the transcript directly when cass is unavailable, so an unindexed session still exports.",
 			InputSchema: &jsonschema.Schema{
 				Type: "object",
 				Properties: map[string]*jsonschema.Schema{
@@ -141,7 +141,7 @@ func (s *Server) registerTools() {
 	s.mcp.AddTool(
 		&gomcp.Tool{
 			Name:        "timeline",
-			Description: "Show recent agent activity timeline. Defaults to last 1 hour.",
+			Description: "Show recent agent activity timeline. Defaults to last 1 hour. Falls back to the local catalog when cass is unavailable; local output carries source:\"local\".",
 			InputSchema: &jsonschema.Schema{
 				Type: "object",
 				Properties: map[string]*jsonschema.Schema{

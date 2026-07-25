@@ -3,9 +3,10 @@
 // As an MCP server (default): exposes session data as MCP tools.
 // As a CLI: search, index, export, and stream agent sessions.
 //
-// Search works with or without cass. cass supplies better ranking and a larger
-// corpus; the local FTS5 catalog supplies availability. Commands that only cass
-// can serve (timeline, export) say so plainly when it is missing.
+// Every command works with or without cass. cass supplies better ranking and a
+// larger corpus; the local FTS5 catalog supplies availability. Timeline falls
+// back to catalog aggregates, and export falls back to reading the transcript
+// directly — which also means an unindexed session still exports.
 //
 // Usage:
 //
@@ -13,8 +14,8 @@
 //	alwe search "auth bug"        # search sessions
 //	alwe search --connector codex "fix"  # search codex sessions
 //	alwe index                    # refresh the local catalog
-//	alwe timeline --since 2h      # recent activity (cass)
-//	alwe export <session.jsonl>   # export session to markdown (cass)
+//	alwe timeline --since 2h      # recent activity
+//	alwe export <session.jsonl>   # export session to markdown
 //	alwe context <file-path>      # sessions that touched a file
 //	alwe health                   # backend status and build id
 package main
@@ -215,8 +216,8 @@ Commands:
   (default)  Start MCP server on stdio
   search     Search agent sessions by content (cass + local catalog)
   index      Refresh the local FTS5 catalog over session transcripts
-  timeline   Show recent agent activity (requires cass)
-  export     Export a session to markdown (requires cass)
+  timeline   Show recent agent activity (cass, else local catalog)
+  export     Export a session to markdown (cass, else direct transcript render)
   context    Find sessions that touched a file
   health     Report backend availability, catalog coverage, and build id
 

@@ -1,18 +1,21 @@
 // Package sessionsearch composes the cass backend and the local catalog into
 // one session-search surface.
 //
-// Neither backend is required. cass supplies better ranking and a larger
-// corpus; the local catalog supplies availability. When cass is missing,
-// unhealthy, or still lock-busy after its retry budget, results come from the
-// local catalog and say so — the caller gets degraded answers instead of an
-// error, which is the whole point of the arrangement.
+// Neither backend is required, and every tool is servable from either one
+// alone. cass supplies better ranking and a larger corpus; the local catalog
+// supplies availability. When cass is missing, unhealthy, or still lock-busy
+// after its retry budget, answers come from the local catalog and say so — the
+// caller gets a weaker answer instead of an error, which is the whole point of
+// the arrangement.
 package sessionsearch
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/mistakeknot/Alwe/pkg/localindex"
 	"github.com/mistakeknot/Alwe/pkg/observer"
@@ -53,6 +56,8 @@ type Service struct {
 	local *localindex.Index      // nil when the catalog could not be opened
 	// localErr records why the catalog is unavailable, for the notice.
 	localErr error
+	// clock is overridable so timeline windows are testable.
+	clock func() time.Time
 }
 
 // Option configures a Service.
@@ -63,6 +68,9 @@ func WithCass(o *observer.CassObserver) Option { return func(s *Service) { s.cas
 
 // WithLocal supplies a local catalog explicitly (used by tests).
 func WithLocal(ix *localindex.Index) Option { return func(s *Service) { s.local = ix } }
+
+// WithClock overrides the clock used for timeline windows (used by tests).
+func WithClock(f func() time.Time) Option { return func(s *Service) { s.clock = f } }
 
 // New builds a Service, attaching whichever backends are available. It only
 // fails when neither backend can be reached, since with no backend at all
@@ -159,20 +167,63 @@ func (s *Service) ContextForFile(ctx context.Context, filePath string, limit int
 	)
 }
 
-// Timeline is cass-only: the local catalog does not model activity windows.
+// Timeline reports recent activity, preferring cass and falling back to the
+// local catalog. Local output is a JSON object with source:"local" so callers
+// can tell the two apart.
 func (s *Service) Timeline(ctx context.Context, since string) (string, error) {
-	if s.cass == nil {
-		return "", fmt.Errorf("timeline requires cass, which is not available")
+	notice := "cass not installed; activity derived from the local catalog (results are local-only)"
+	if s.cass != nil {
+		out, err := s.cass.Timeline(ctx, since)
+		if err == nil {
+			return out, nil
+		}
+		if s.local == nil {
+			return "", err
+		}
+		// cass failed but the catalog can answer: fall through rather than
+		// propagating an outage.
+		notice = "cass unavailable (" + err.Error() +
+			"); activity derived from the local catalog (results are local-only)"
 	}
-	return s.cass.Timeline(ctx, since)
+	if s.local == nil {
+		return "", fmt.Errorf("timeline unavailable: no cass and no local catalog")
+	}
+
+	res, err := s.local.Timeline(ctx, since, s.now())
+	if err != nil {
+		return "", err
+	}
+	res.Notice = notice
+	out, err := json.MarshalIndent(res, "", "  ")
+	if err != nil {
+		return "", err
+	}
+	return string(out), nil
 }
 
-// ExportSession is cass-only.
+// ExportSession renders a session, preferring cass and falling back to reading
+// the transcript directly. The local path needs no catalog, so a session that
+// has not been indexed yet still exports.
 func (s *Service) ExportSession(ctx context.Context, path string) (string, error) {
-	if s.cass == nil {
-		return "", fmt.Errorf("export requires cass, which is not available")
+	if s.cass != nil {
+		out, err := s.cass.ExportSession(ctx, path)
+		if err == nil {
+			return out, nil
+		}
 	}
-	return s.cass.ExportSession(ctx, path)
+	md, err := localindex.ExportMarkdown(path)
+	if err != nil {
+		return "", err
+	}
+	return md, nil
+}
+
+// now returns the clock the service reads, overridable in tests.
+func (s *Service) now() time.Time {
+	if s.clock != nil {
+		return s.clock()
+	}
+	return time.Now()
 }
 
 // Health reports per-backend availability. Unlike the old boolean, an
@@ -188,7 +239,13 @@ type Health struct {
 	// CassSelfReport carries cass's own verdict and stated problems.
 	CassSelfReport *observer.CassHealth `json:"cass_self_report,omitempty"`
 	Local          bool                 `json:"local"`
-	Degraded       bool                 `json:"degraded"`
+	// Degraded means a capability is unavailable, not merely that a backend is
+	// missing. Every MCP tool can now be served from either backend alone, so
+	// losing one reduces ranking quality without losing capability.
+	Degraded bool `json:"degraded"`
+	// ReducedRanking flags that results come from the weaker-ranked backend
+	// only — real information, but not a capability loss.
+	ReducedRanking bool                 `json:"reduced_ranking,omitempty"`
 	Notice         string               `json:"notice,omitempty"`
 	Coverage       *localindex.Coverage `json:"local_coverage,omitempty"`
 	BuildID        string               `json:"build_id,omitempty"`
@@ -204,7 +261,9 @@ func (s *Service) Health(ctx context.Context) Health {
 		h.Cass = report.Reachable
 	}
 	h.Healthy = h.Cass || h.Local
-	h.Degraded = !h.Cass || !h.Local
+	// Capability, not backend count: all five tools are servable from either
+	// backend alone, so only losing both is a degradation.
+	h.Degraded = !h.Healthy
 
 	switch {
 	case h.Cass && h.Local:
@@ -215,11 +274,12 @@ func (s *Service) Health(ctx context.Context) Health {
 				strings.Join(h.CassSelfReport.Errors, ", ")
 		}
 	case h.Local:
-		h.Notice = "cass unavailable; searches serve local catalog results only"
+		h.ReducedRanking = true
+		h.Notice = "cass unavailable; all tools served from the local catalog with local-only ranking"
 	case h.Cass:
-		h.Notice = "local catalog unavailable; searches depend on cass"
+		h.Notice = "local catalog unavailable; all tools served by cass"
 	default:
-		h.Notice = "no search backend available"
+		h.Notice = "no backend available"
 	}
 
 	if s.local != nil {

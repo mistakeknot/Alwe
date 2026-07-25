@@ -2,7 +2,7 @@
 
 Universal agent observation layer. Watches any AI coding agent's sessions, exposes structured data as MCP tools and CLI.
 
-cass is an optional accelerator, not a dependency: a local SQLite FTS5 catalog keeps search available when cass is missing, stale, or lock-busy.
+cass is an optional accelerator, not a dependency: a local SQLite FTS5 catalog keeps **all five MCP tools** available when cass is missing, stale, or lock-busy.
 
 The other half of Zakalwe — Zaka steers, Alwe observes.
 
@@ -48,13 +48,26 @@ internal/
 - **Backend scores are not comparable.** cass reports corpus-wide BM25 in the
   tens; FTS5 inverted rank lands near zero. Merge with reciprocal rank fusion,
   never by sorting raw scores together.
+- **`Degraded` means capability lost, not backend missing.** Every tool is
+  servable from either backend alone, so losing one sets `ReducedRanking`, not
+  `Degraded`. Only losing both is a degradation.
+- **Export takes no catalog.** `localindex.ExportMarkdown` is a package-level
+  function on purpose: requiring an open index would mean an unindexed session
+  could not be exported, which is the freshness gap the local path closes.
+- **Timeline windows on transcript mtime**, which is numeric, indexed, and the
+  honest signal — a transcript is only written while its session runs. Message
+  timestamps then come from the catalog by rowid range.
+- **Real-data tests are load-bearing.** `pkg/sessionsearch/realdata_test.go`
+  asserts coordinate agreement against actual transcripts. Three defects once
+  survived a green synthetic suite; do not delete these because they skip on a
+  fresh machine.
 
 ## MCP Tools
 
 - `search_sessions` — search agent sessions by content, filter by connector; merges cass + local, degrades to local-only with `degraded`/`notice` set
 - `context_for_file` — find sessions that touched a file (same merge/fallback)
-- `export_session` — export session to markdown (cass only)
-- `timeline` — recent activity across all agents (cass only)
+- `export_session` — export session to markdown; falls back to rendering the transcript directly, so an unindexed session still exports
+- `timeline` — recent activity across all agents; falls back to catalog aggregates with `source:"local"` and a notice
 - `health` — per-backend availability, local catalog coverage, and build id
 
 ## Git

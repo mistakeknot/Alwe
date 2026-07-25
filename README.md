@@ -12,8 +12,9 @@ The other half of Zakalwe — [Zaka](https://github.com/mistakeknot/Zaka) steers
 go install github.com/mistakeknot/Alwe/cmd/alwe@latest
 ```
 
-cass is optional. Without it, `alwe search` and `alwe context` run off the local
-catalog; `alwe timeline` and `alwe export` require cass and say so plainly.
+cass is optional — every command works without it. Search and context run off
+the local catalog, timeline falls back to catalog aggregates, and export renders
+the transcript directly (which also means an unindexed session still exports).
 
 ## Usage
 
@@ -32,8 +33,13 @@ backends' raw scores are not comparable, so fusing positions keeps either
 backend's top hits from being buried. Responses carry `degraded` and `notice`
 fields when a backend is missing.
 
+`timeline` and `export_session` fall back to the local catalog too, so all five
+tools survive cass being absent.
+
 `health` reports per-backend availability, local catalog coverage, and the
-running binary's build id, so a stale MCP server is detectable.
+running binary's build id, so a stale MCP server is detectable. `degraded` means
+a capability is unavailable; losing one backend sets `reduced_ranking` instead,
+since either backend alone can serve every tool.
 
 ### CLI
 

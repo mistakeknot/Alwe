@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mistakeknot/Alwe/pkg/localindex"
 	"github.com/mistakeknot/Alwe/pkg/observer"
@@ -89,6 +90,40 @@ exit %d
 		t.Fatal(err)
 	}
 	return script
+}
+
+// localWithMtime builds a catalog over one transcript with a controlled mtime,
+// and returns the catalog plus the transcript path.
+func localWithMtime(t *testing.T, name string, mtime time.Time, prompts ...string) (*localindex.Index, string) {
+	t.Helper()
+	root := t.TempDir()
+	var sb strings.Builder
+	for _, p := range prompts {
+		line, _ := json.Marshal(map[string]any{
+			"type":      "user",
+			"timestamp": mtime.UTC().Format(time.RFC3339),
+			"message":   map[string]any{"role": "user", "content": p},
+		})
+		sb.Write(line)
+		sb.WriteByte('\n')
+	}
+	path := filepath.Join(root, name+".jsonl")
+	if err := os.WriteFile(path, []byte(sb.String()), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chtimes(path, mtime, mtime); err != nil {
+		t.Fatal(err)
+	}
+
+	ix, err := localindex.Open(filepath.Join(t.TempDir(), "sessions.db"))
+	if err != nil {
+		t.Fatalf("open catalog: %v", err)
+	}
+	t.Cleanup(func() { ix.Close() })
+	if _, err := ix.Index(context.Background(), []string{root}); err != nil {
+		t.Fatalf("index: %v", err)
+	}
+	return ix, path
 }
 
 // cassPayload renders a `cass search --json` envelope.
@@ -352,8 +387,13 @@ func TestHealth_LocalOnlyIsStillHealthy(t *testing.T) {
 	if h.Cass {
 		t.Error("cass should report unavailable")
 	}
-	if !h.Degraded || h.Notice == "" {
-		t.Errorf("expected a degraded notice, got %+v", h)
+	// Capability is intact (every tool is servable from the catalog), so this
+	// is reduced ranking rather than degradation.
+	if h.Degraded {
+		t.Errorf("no capability lost, so degraded must be false: %+v", h)
+	}
+	if !h.ReducedRanking || h.Notice == "" {
+		t.Errorf("expected a reduced-ranking notice, got %+v", h)
 	}
 	if h.Coverage == nil || h.Coverage.Files != 1 {
 		t.Errorf("expected local coverage to be reported, got %+v", h.Coverage)
@@ -377,20 +417,151 @@ func TestHealth_ReportsBuildID(t *testing.T) {
 	t.Logf("build_id=%q module=%q", h.BuildID, h.BuildModule)
 }
 
-func TestTimelineAndExport_ExplainCassRequirement(t *testing.T) {
-	svc, err := New(WithLocal(localWith(t, "sess-cassonly", "content")))
+func TestTimeline_FallsBackToLocalCatalog(t *testing.T) {
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	local, transcript := localWithMtime(t, "sess-tl", now.Add(-2*time.Hour), "recent local activity")
+
+	svc, err := New(
+		WithCass(cassObserverAt(t, fakeCass(t, 7, ""))), // cass lock-busy
+		WithLocal(local),
+		WithClock(func() time.Time { return now }),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	out, err := svc.Timeline(context.Background(), "24h")
+	if err != nil {
+		t.Fatalf("timeline should fall back, not fail: %v", err)
+	}
+
+	var res localindex.TimelineResult
+	if err := json.Unmarshal([]byte(out), &res); err != nil {
+		t.Fatalf("timeline output is not the local JSON shape: %v\n%s", err, out)
+	}
+	if res.Source != "local" {
+		t.Errorf("source = %q, want local so callers can tell the paths apart", res.Source)
+	}
+	if res.Totals.Sessions != 1 {
+		t.Fatalf("got %d sessions, want the one recent transcript", res.Totals.Sessions)
+	}
+	if res.Sessions[0].FilePath != transcript {
+		t.Errorf("file_path = %q, want %q", res.Sessions[0].FilePath, transcript)
+	}
+}
+
+func TestTimeline_PrefersCassWhenItAnswers(t *testing.T) {
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	local, _ := localWithMtime(t, "sess-pref", now.Add(-1*time.Hour), "local activity")
+
+	svc, err := New(
+		WithCass(cassObserverAt(t, fakeCass(t, 0, `{"source":"cass","events":[]}`))),
+		WithLocal(local),
+		WithClock(func() time.Time { return now }),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	out, err := svc.Timeline(context.Background(), "24h")
+	if err != nil {
+		t.Fatalf("timeline: %v", err)
+	}
+	if !strings.Contains(out, `"source":"cass"`) {
+		t.Errorf("expected cass output when cass answers, got: %s", out)
+	}
+}
+
+func TestExportSession_FallsBackToDirectTranscriptRender(t *testing.T) {
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	local, transcript := localWithMtime(t, "sess-exp", now, "a distinctive tangerine prompt")
+
+	svc, err := New(
+		WithCass(cassObserverAt(t, fakeCass(t, 7, ""))), // cass lock-busy
+		WithLocal(local),
+	)
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+
+	md, err := svc.ExportSession(context.Background(), transcript)
+	if err != nil {
+		t.Fatalf("export should fall back, not fail: %v", err)
+	}
+	if !strings.Contains(md, "a distinctive tangerine prompt") {
+		t.Errorf("export missing the session's user prompt:\n%s", md)
+	}
+	if !strings.Contains(md, "no cass") {
+		t.Errorf("export should state it used the local path:\n%s", md)
+	}
+}
+
+// Export must not need the catalog: an unindexed session still exports, which
+// is the freshness gap the local path exists to close.
+func TestExportSession_WorksForUnindexedTranscript(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "never-indexed.jsonl")
+	line, _ := json.Marshal(map[string]any{
+		"type":      "user",
+		"timestamp": "2026-07-25T10:00:00Z",
+		"message":   map[string]any{"role": "user", "content": "brand new nectarine session"},
+	})
+	if err := os.WriteFile(path, append(line, '\n'), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	svc, err := New(WithCass(cassObserverAt(t, fakeCass(t, 7, ""))))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	svc.local = nil // no catalog at all
+
+	md, err := svc.ExportSession(context.Background(), path)
+	if err != nil {
+		t.Fatalf("export with no catalog and no cass: %v", err)
+	}
+	if !strings.Contains(md, "brand new nectarine session") {
+		t.Errorf("export missing content:\n%s", md)
+	}
+}
+
+// Condition 4: with cass absent every tool is still servable, so health must
+// not call that a degradation. Ranking quality is reported separately.
+func TestHealth_CassAbsentIsNotDegraded(t *testing.T) {
+	now := time.Date(2026, 7, 25, 12, 0, 0, 0, time.UTC)
+	local, _ := localWithMtime(t, "sess-h", now, "content")
+
+	svc, err := New(WithLocal(local))
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	svc.cass = nil
 
-	if _, err := svc.Timeline(context.Background(), "1h"); err == nil ||
-		!strings.Contains(err.Error(), "requires cass") {
-		t.Errorf("timeline error = %v, want an explicit cass requirement", err)
+	h := svc.Health(context.Background())
+	if !h.Healthy {
+		t.Error("a working local catalog means healthy")
 	}
-	if _, err := svc.ExportSession(context.Background(), "/x.jsonl"); err == nil ||
-		!strings.Contains(err.Error(), "requires cass") {
-		t.Errorf("export error = %v, want an explicit cass requirement", err)
+	if h.Degraded {
+		t.Error("no capability is lost with cass absent, so degraded must be false")
+	}
+	if !h.ReducedRanking {
+		t.Error("ranking quality is reduced and should be reported as such")
+	}
+	if !strings.Contains(h.Notice, "local-only ranking") {
+		t.Errorf("notice %q should explain the ranking reduction", h.Notice)
+	}
+}
+
+func TestHealth_DegradedOnlyWhenNoBackend(t *testing.T) {
+	svc, err := New(WithCass(cassObserverAt(t, fakeCass(t, 7, ""))))
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
+	svc.local = nil
+
+	h := svc.Health(context.Background())
+	if h.Healthy || !h.Degraded {
+		t.Errorf("no reachable backend must be unhealthy and degraded, got %+v", h)
 	}
 }
 
